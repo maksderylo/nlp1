@@ -29,19 +29,25 @@ def download_ag_news_texts():
     return corpus
     
 
-def train_tokenizer(corpus, vocab_size, min_frequency, pretokenizer=Metaspace(), unk_token="[UNK]"):
+def train_tokenizer(corpus, vocab_size, min_frequency, pretokenizer=Metaspace(), unk_token="[UNK]", normalizer=None, show_progress=True):
     """
     corpus: a list of texts (each a string)
     vocab_size: number of distinct BPE tokens
     min_frequency: we only merge token pairs that are frequent enough
     pretokenizer: a simple tokenizer that we use before BPE tokenization
-    
+
         You probably don't need to change the pretokenizer, unless you are working with
-        languages that really don't use any form of blank space 
+        languages that really don't use any form of blank space
         (then you could, for example, pretokenize at character level)
+    normalizer: optional normalisation applied before pretokenization (e.g. tokenizers.normalizers.Lowercase())
+    show_progress: show the trainer's progress bar (in some notebook frontends it shows up as blank lines)
     """
     # Create an empty BPE tokenizer
     tokenizer = Tokenizer(BPE(unk_token=unk_token)) #unk_token used for characters that cannot be encoded
+
+    # Optionally normalise the text (e.g. lowercase) before anything else
+    if normalizer is not None:
+        tokenizer.normalizer = normalizer
 
     # First split the corpus into words
     tokenizer.pre_tokenizer = pretokenizer
@@ -50,7 +56,8 @@ def train_tokenizer(corpus, vocab_size, min_frequency, pretokenizer=Metaspace(),
     trainer = BpeTrainer(
         vocab_size=vocab_size, # The size of the vocabulary to learn.
         min_frequency=min_frequency, # Only perform a merge if the pair occurs at least min_frequency times in the training corpus.
-        special_tokens=[unk_token]
+        special_tokens=[unk_token],
+        show_progress=show_progress,
     )
 
     # Learn the vocabulary and merge rules
