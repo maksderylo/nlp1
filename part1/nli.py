@@ -18,7 +18,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import PercentFormatter
 from scipy.sparse import csr_matrix, hstack
 from sklearn.metrics import accuracy_score, confusion_matrix
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import GroupKFold, KFold
 from torch.utils.data import DataLoader
 
 from . import analysis
@@ -263,22 +263,26 @@ class NeuralClassifier:
         return predictions
 
 
-def grouped_splits(groups, num_folds=5, seeds=(0, 1, 2)):
+def grouped_splits(groups, num_folds=5, seeds=(0, 1, 2), grouped=True):
     """
     List of (training_ids, validation_ids), num_folds per seed, ordered by seed and then fold.
 
     The folds are grouped (a premise never appears in both training and validation) and depend only
     on the groups and the seeds, so every system evaluated on the same data gets exactly the same folds.
+    grouped=False: plain k-fold over the pairs instead, ignoring the groups (only for the comparison in the notebook)
     """
     groups = np.asarray(groups)
     splits = []
     for seed in seeds:
-        folds = GroupKFold(n_splits=num_folds, shuffle=True, random_state=seed)
+        if grouped:
+            folds = GroupKFold(n_splits=num_folds, shuffle=True, random_state=seed)
+        else:
+            folds = KFold(n_splits=num_folds, shuffle=True, random_state=seed)
         splits.extend(folds.split(groups, groups=groups))
     return splits
 
 
-def cross_validate(make_model, X, y, groups, num_folds=5, seeds=(0, 1, 2), n_jobs=-1):
+def cross_validate(make_model, X, y, groups, num_folds=5, seeds=(0, 1, 2), n_jobs=-1, grouped=True):
     """
     Train and evaluate a fresh model on every grouped fold, returns the list of validation accuracies.
 
@@ -289,6 +293,7 @@ def cross_validate(make_model, X, y, groups, num_folds=5, seeds=(0, 1, 2), n_job
     y: labels
     groups: promptID per pair
     n_jobs: number of folds trained in parallel (-1: all cores)
+    grouped: False for plain k-fold, where the hypotheses of a premise can end up in different folds
     """
     y, groups = np.asarray(y), np.asarray(groups)
 
@@ -300,7 +305,7 @@ def cross_validate(make_model, X, y, groups, num_folds=5, seeds=(0, 1, 2), n_job
             model.fit(X[training_ids], y[training_ids])
         return accuracy_score(y[validation_ids], model.predict(X[validation_ids]))
 
-    splits = grouped_splits(groups, num_folds, seeds)
+    splits = grouped_splits(groups, num_folds, seeds, grouped)
     return Parallel(n_jobs=n_jobs)(delayed(run_fold)(t, v) for t, v in splits)
 
 
