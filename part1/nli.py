@@ -146,22 +146,26 @@ class InteractionMLP(nn.Module):
     """
     MLP that compares premise and hypothesis (in the style of Conneau et al., 2017).
 
-    Input: a sparse batch [premise features | hypothesis features], each block vocab_size wide (as built by pair_matrix).
+    Input: a sparse batch [premise features | hypothesis features], each block vocab_size wide (as built by pair_matrix),
+        optionally followed by num_statistics extra columns (e.g. the overlap statistics) for the hybrid model.
     Process: the same encoder (sparse matmul + ReLU) turns premise and hypothesis into vectors p and h,
         which are combined as [p, h, |p - h|, p * h], followed by a hidden layer (ReLU + dropout) and log-softmax.
+        Hybrid (num_statistics > 0): the extra columns are appended unchanged, [p, h, |p - h|, p * h, statistics],
+        so the classifier sees the learned comparison and our handcrafted one side by side.
     Output: logprobs over num_classes, like smlp.SparseMLP.
     """
 
-    def __init__(self, vocab_size, hidden_dim, num_classes, dropout=0.2):
+    def __init__(self, vocab_size, hidden_dim, num_classes, dropout=0.2, num_statistics=0):
         super().__init__()
         self.vocab_size = vocab_size
+        self.num_statistics = num_statistics
         # the sentence encoder is shared: premise and hypothesis go through the same weights
         self.weight = nn.Parameter(torch.empty(vocab_size, hidden_dim))
         self.bias = nn.Parameter(torch.zeros(hidden_dim))
         nn.init.xavier_uniform_(self.weight)
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(4 * hidden_dim, hidden_dim),
+            nn.Linear(4 * hidden_dim + num_statistics, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, num_classes),
@@ -172,18 +176,25 @@ class InteractionMLP(nn.Module):
         return torch.relu(torch.sparse.mm(x, self.weight) + self.bias)
 
     def forward(self, x):
-        # split the sparse batch into its premise columns and its hypothesis columns
+        # split the sparse batch into its premise columns, its hypothesis columns and (hybrid) its statistics columns
         x = x.coalesce()
         rows, cols = x.indices()
         values = x.values()
         in_premise = cols < self.vocab_size
+        in_hypothesis = (cols >= self.vocab_size) & (cols < 2 * self.vocab_size)
+        in_statistics = cols >= 2 * self.vocab_size
         shape = (x.shape[0], self.vocab_size)
         premise = torch.sparse_coo_tensor(torch.stack([rows[in_premise], cols[in_premise]]), values[in_premise], shape)
-        hypothesis = torch.sparse_coo_tensor(torch.stack([rows[~in_premise], cols[~in_premise] - self.vocab_size]),
-                                             values[~in_premise], shape)
+        hypothesis = torch.sparse_coo_tensor(torch.stack([rows[in_hypothesis], cols[in_hypothesis] - self.vocab_size]),
+                                             values[in_hypothesis], shape)
 
         p, h = self.encode(premise), self.encode(hypothesis)
-        return self.classifier(torch.cat([p, h, torch.abs(p - h), p * h], dim=-1))
+        combined = [p, h, torch.abs(p - h), p * h]
+        if self.num_statistics:
+            statistics = torch.zeros(x.shape[0], self.num_statistics, dtype=p.dtype)
+            statistics[rows[in_statistics], cols[in_statistics] - 2 * self.vocab_size] = values[in_statistics].to(p.dtype)
+            combined.append(statistics)
+        return self.classifier(torch.cat(combined, dim=-1))
 
 
 class NeuralClassifier:
@@ -261,6 +272,22 @@ class NeuralClassifier:
         dummy_labels = np.zeros(X.shape[0], dtype=int)
         _, predictions = smlp.evaluate(self.model, self._loader(X, dummy_labels, shuffle=False), nn.NLLLoss())
         return predictions
+
+
+def sparse_mlp(input_dim, hidden_dim=128, dropout=0.1, activation="relu", num_hidden_layers=1, num_classes=3):
+    """
+    The tutorial's smlp.SparseMLP, optionally with tanh instead of ReLU, or with extra hidden layers
+    (each extra layer is Linear(hidden_dim, hidden_dim) + activation + dropout, before the output layer).
+    With the default arguments it is exactly smlp.SparseMLP(input_dim, 128, 3, dropout=0.1).
+    """
+    activations = {"relu": nn.ReLU, "tanh": nn.Tanh}
+    model = smlp.SparseMLP(input_dim, hidden_dim, num_classes, dropout=dropout)
+    model.activation = activations[activation]()
+    extra_layers = []
+    for _ in range(num_hidden_layers - 1):
+        extra_layers += [nn.Linear(hidden_dim, hidden_dim), activations[activation](), nn.Dropout(dropout)]
+    model.output = nn.Sequential(*extra_layers, *model.output)
+    return model
 
 
 def grouped_splits(groups, num_folds=5, seeds=(0, 1, 2), grouped=True):
